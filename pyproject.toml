@@ -10,6 +10,8 @@ dependencies = [
     "shapely>=2.0",
     "pyproj>=3.6",
     "pandas>=2.0",
+    "matplotlib>=3.7",
+    "contextily>=1.5",
 ]
 
 [project.scripts]

@@ -506,9 +506,9 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "contextily", specifier = ">=1.7.0" },
+    { name = "contextily", specifier = ">=1.5" },
     { name = "geopandas", specifier = ">=1.0" },
-    { name = "matplotlib", specifier = ">=3.11.0" },
+    { name = "matplotlib", specifier = ">=3.7" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.9" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "pyogrio", specifier = ">=0.10" },
