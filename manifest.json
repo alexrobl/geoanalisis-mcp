@@ -1,0 +1,46 @@
+{
+  "manifest_version": "0.4",
+  "name": "geoanalisis-mcp",
+  "display_name": "GeoAnalisis",
+  "version": "0.2.0",
+  "description": "Análisis y cartografía de datos espaciales vectoriales (FileGDB, Shapefile, GeoJSON, GeoPackage, KML) directamente en Claude.",
+  "long_description": "Lee y analiza archivos espaciales vectoriales locales con GDAL/OGR: inspección de capas y esquemas, estadísticas por campo, lectura de features con filtros, mapas interactivos HTML y exportación de mapas cartográficos (simbología, leyenda, escala gráfica, norte y grilla de coordenadas). Reproyección automática con manejo robusto de CRS, pensado para flujos de trabajo GIS en español.",
+  "author": {
+    "name": "Alexander Robles",
+    "email": "dalexrobles@gmail.com",
+    "url": "https://github.com/alexrobl"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alexrobl/geoanalisis-mcp"
+  },
+  "homepage": "https://github.com/alexrobl/geoanalisis-mcp",
+  "support": "https://github.com/alexrobl/geoanalisis-mcp/issues",
+  "license": "Apache-2.0",
+  "keywords": ["gis", "geospatial", "maps", "cartografia", "shapefile", "geojson", "geopackage", "gdal"],
+  "server": {
+    "type": "uv",
+    "entry_point": "geoanalisis/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--project", "${__dirname}", "geoanalisis-mcp"]
+    }
+  },
+  "tools": [
+    { "name": "list_layers", "description": "Lista las capas de un archivo espacial con tipo de geometría, número de features y CRS" },
+    { "name": "get_layer_schema", "description": "Esquema completo de una capa: campos, tipos, bbox y CRS" },
+    { "name": "scan_field_stats", "description": "Estadísticas descriptivas por campo (numéricos y categóricos)" },
+    { "name": "read_features", "description": "Lee features como GeoJSON FeatureCollection con filtros WHERE y bbox" },
+    { "name": "preview_geometries", "description": "Vista previa de geometrías en WKT" },
+    { "name": "render_map", "description": "Mapa interactivo HTML con pan/zoom/click y coloreado por campo" },
+    { "name": "export_map_image", "description": "Exporta un mapa PNG con simbología, basemap y etiquetado inteligente" },
+    { "name": "export_map_cartographic", "description": "Plancha cartográfica PNG con título, leyenda, escala gráfica, norte y grilla de coordenadas" }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  }
+}

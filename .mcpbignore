@@ -1,0 +1,8 @@
+# Excluir del bundle .mcpb
+.venv/
+__pycache__/
+*.pyc
+*.mcpb
+.git/
+.gitignore
+.claude/
