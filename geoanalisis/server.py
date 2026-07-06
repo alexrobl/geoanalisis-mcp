@@ -771,6 +771,80 @@ def _symbology_report(
     return TextContent(type="text", text="\n".join(lines))
 
 
+_BASEMAP_DEFAULT_ATTR = "© OpenStreetMap contributors © CARTO"
+
+
+def _resolve_basemap(basemap: Optional[str]) -> tuple:
+    """Resuelve el parámetro `basemap` a (source, attribution, nota_reporte).
+
+    source None → usar el default CartoDB Positron. Acepta plantillas XYZ con
+    tokens {z}/{x}/{y} tal cual, o la raíz de un ArcGIS MapServer con cache de
+    tiles en Web Mercator (se valida vía ?f=json y se usa /tile/{z}/{y}/{x}).
+    """
+    if not basemap:
+        return None, _BASEMAP_DEFAULT_ATTR, None
+
+    url = basemap.strip().rstrip("/")
+    if "{z}" in url:
+        return url, None, f"basemap personalizado (plantilla XYZ): {url}"
+
+    if "/mapserver" not in url.lower():
+        raise ValueError(
+            "basemap debe ser una plantilla XYZ con tokens {z}/{x}/{y} o la raíz "
+            "de un servicio ArcGIS MapServer con cache de tiles "
+            "(ej. https://host/arcgis/rest/services/Nombre/MapServer)."
+        )
+
+    import requests
+    try:
+        meta = requests.get(url, params={"f": "json"}, timeout=15).json()
+    except Exception as exc:
+        raise ValueError(f"No se pudo leer el servicio ArcGIS '{url}': {exc}") from exc
+    if meta.get("error"):
+        raise ValueError(
+            f"El servicio ArcGIS '{url}' respondió error: "
+            f"{meta['error'].get('message', meta['error'])}"
+        )
+    if not meta.get("singleFusedMapCache"):
+        raise ValueError(
+            f"El servicio '{url}' no tiene cache de tiles (singleFusedMapCache=false) "
+            "y no puede usarse como basemap. Usa un MapServer tileado o una "
+            "plantilla XYZ con tokens {z}/{x}/{y}."
+        )
+    tile_info = meta.get("tileInfo") or {}
+    sr = tile_info.get("spatialReference") or {}
+    if not {sr.get("wkid"), sr.get("latestWkid")} & {102100, 3857}:
+        raise ValueError(
+            f"El cache de tiles de '{url}' no está en Web Mercator "
+            f"(wkid={sr.get('wkid')}); solo se soportan caches EPSG:3857/102100."
+        )
+    lods = tile_info.get("lods") or []
+    levels = f"niveles {lods[0]['level']}–{lods[-1]['level']}" if lods else "niveles ?"
+    attribution = (meta.get("copyrightText") or "").strip() or None
+    name = meta.get("mapName") or url.rsplit("/rest/services/", 1)[-1]
+    note = f"basemap: ArcGIS tile cache '{name}' ({levels}) — {url}"
+    return url + "/tile/{z}/{y}/{x}", attribution, note
+
+
+def _add_basemap(ax, crs, source, attribution, requested: Optional[str]) -> Optional[str]:
+    """add_basemap con fallback a CartoDB Positron si el basemap pedido falla."""
+    import contextily as cx
+    try:
+        cx.add_basemap(
+            ax, crs=crs,
+            source=source or cx.providers.CartoDB.Positron,
+            attribution=attribution,
+        )
+        return None
+    except Exception as exc:
+        if not requested:
+            raise
+        cx.add_basemap(ax, crs=crs, source=cx.providers.CartoDB.Positron,
+                       attribution=_BASEMAP_DEFAULT_ATTR)
+        return (f"⚠ basemap '{requested}' falló al descargar tiles "
+                f"({exc.__class__.__name__}: {exc}); se usó CartoDB Positron")
+
+
 _EXTRA_LAYER_KEYS = {"path", "layer", "limit", "color", "alpha", "linewidth",
                      "linestyle", "edgecolor", "markersize", "label", "zorder", "crs"}
 
@@ -1179,6 +1253,7 @@ def export_map_image(
     label_by: Optional[str] = None,
     extra_layers: Optional[list[dict]] = None,
     source_crs: Optional[str] = None,
+    basemap: Optional[str] = None,
 ) -> list[TextContent | ImageContent]:
     """
     Genera una imagen del mapa con basemap CartoDB Positron mostrada INLINE en el chat
@@ -1238,15 +1313,24 @@ def export_map_image(
                        lon/lat se asume EPSG:4326; con bounds proyectados se rechaza
                        indicando cómo corregir. Todas las capas se reproyectan
                        automáticamente a Web Mercator para el render.
+        basemap:       URL de un basemap alternativo al default CartoDB Positron.
+                       Acepta la raíz de un servicio ArcGIS MapServer con cache de
+                       tiles en Web Mercator (ej. "https://host/arcgis/rest/services/
+                       Nombre/MapServer": se valida el cache y se usa la plantilla
+                       /tile/{z}/{y}/{x}, con atribución del copyrightText) o una
+                       plantilla XYZ con tokens, ej. "https://tile.host/{z}/{x}/{y}.png".
+                       Si los tiles fallan al descargar se usa CartoDB Positron como
+                       fallback y se reporta en el texto de salida.
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
-    import contextily as cx
 
     if bbox and len(bbox) != 4:
         raise ValueError("bbox debe ser [xmin, ymin, xmax, ymax].")
+
+    bm_source, bm_attr, bm_note = _resolve_basemap(basemap)
 
     gdf = _read_gdf(path, layer, limit, where, bbox)
     if gdf.empty:
@@ -1301,12 +1385,8 @@ def export_map_image(
         ax.set_ylim(fb[1] - pad_y, fb[3] + pad_y)
 
     # --- Basemap ---
-    cx.add_basemap(
-        ax,
-        crs=gdf_3857.crs,
-        source=cx.providers.CartoDB.Positron,
-        attribution="© OpenStreetMap contributors © CARTO",
-    )
+    bm_fallback = _add_basemap(ax, gdf_3857.crs, bm_source, bm_attr, basemap)
+    extra_notes.extend(n for n in (bm_note, bm_fallback) if n)
     ax.set_axis_off()
     ax.add_patch(mpatches.Rectangle(
         (0, 0), 1, 1,
@@ -1386,6 +1466,7 @@ def export_map_cartographic(
     label_by: Optional[str] = None,
     extra_layers: Optional[list[dict]] = None,
     source_crs: Optional[str] = None,
+    basemap: Optional[str] = None,
 ) -> list[TextContent | ImageContent]:
     """
     Genera un mapa cartográfico técnico con layout formal completo:
@@ -1426,6 +1507,10 @@ def export_map_cartographic(
                      default es solo para capas de puro contexto.
         source_crs:  CRS a asumir para la capa principal SOLO si el archivo no
                      define uno (ej. "EPSG:3116"). Ver export_map_image.
+        basemap:     URL de un basemap alternativo al default CartoDB Positron:
+                     raíz de un ArcGIS MapServer con cache de tiles en Web
+                     Mercator o plantilla XYZ con tokens {z}/{x}/{y}.
+                     Ver export_map_image.
     """
     import os
     import warnings
@@ -1436,10 +1521,11 @@ def export_map_cartographic(
     import matplotlib.gridspec as mgridspec
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
-    import contextily as cx
 
     if bbox and len(bbox) != 4:
         raise ValueError("bbox debe ser [xmin, ymin, xmax, ymax].")
+
+    bm_source, bm_attr, bm_note = _resolve_basemap(basemap)
 
     # ── Leer datos ────────────────────────────────────────────────────────────
     gdf = _read_gdf(path, layer, limit, where, bbox)
@@ -1556,13 +1642,9 @@ def export_map_cartographic(
     ax_map.set_xlim(_xc - _dx / 2, _xc + _dx / 2)
     ax_map.set_ylim(_yc - _dy / 2, _yc + _dy / 2)
 
-    # ── Basemap CartoDB Positron ──────────────────────────────────────────────
-    cx.add_basemap(
-        ax_map,
-        crs=gdf_3857.crs,
-        source=cx.providers.CartoDB.Positron,
-        attribution="© OpenStreetMap contributors © CARTO",
-    )
+    # ── Basemap (default CartoDB Positron; ver parámetro `basemap`) ──────────
+    bm_fallback = _add_basemap(ax_map, gdf_3857.crs, bm_source, bm_attr, basemap)
+    extra_notes.extend(n for n in (bm_note, bm_fallback) if n)
     ax_map.set_axis_off()
 
     # ── PANEL LATERAL ─────────────────────────────────────────────────────────
