@@ -1,6 +1,6 @@
 [project]
 name = "geoanalisis-mcp"
-version = "0.2.2"
+version = "0.2.3"
 description = "MCP server para lectura, análisis y cartografía de datos espaciales vectoriales"
 readme = "README.md"
 license = "Apache-2.0"
