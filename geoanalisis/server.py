@@ -885,6 +885,18 @@ def _add_basemap(ax, crs, source, attribution, requested: Optional[str],
                 f"({exc.__class__.__name__}: {exc}); se usó CartoDB Positron")
 
 
+def _auto_markersize(n: int, map_width_in: float) -> float:
+    """Área (pt²) del marcador para capas de puntos.
+
+    Crece con lienzos anchos y decrece con muchos puntos: un puñado de
+    estaciones debe verse a golpe de vista sobre un basemap ocupado, pero
+    miles de puntos no deben taparse entre sí.
+    """
+    d = 11.0 if n <= 25 else 8.0 if n <= 250 else 5.0  # diámetro pt con lienzo de 10 in
+    d *= max(map_width_in, 5.0) / 10.0
+    return d * d
+
+
 _EXTRA_LAYER_KEYS = {"path", "layer", "limit", "color", "alpha", "linewidth",
                      "linestyle", "edgecolor", "markersize", "label", "zorder", "crs"}
 
@@ -1294,6 +1306,7 @@ def export_map_image(
     extra_layers: Optional[list[dict]] = None,
     source_crs: Optional[str] = None,
     basemap: Optional[str] = None,
+    markersize: Optional[float] = None,
 ) -> list[TextContent | ImageContent]:
     """
     Genera una imagen del mapa con basemap CartoDB Positron mostrada INLINE en el chat
@@ -1363,6 +1376,10 @@ def export_map_image(
                        plantilla XYZ con tokens, ej. "https://tile.host/{z}/{x}/{y}.png".
                        Si los tiles fallan al descargar se usa CartoDB Positron como
                        fallback y se reporta en el texto de salida.
+        markersize:    Tamaño del marcador para capas de puntos, en pt² (semántica
+                       matplotlib; ej. 100 ≈ círculo de 3.5 mm). Default None =
+                       automático según número de puntos y ancho del lienzo, con
+                       halo blanco para resaltar sobre el basemap.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -1409,14 +1426,32 @@ def export_map_image(
     extra_gdfs, extra_handles, extra_notes = _plot_extra_layers(ax, extra_layers)
 
     # --- Capa principal ---
-    gdf_3857.plot(
-        ax=ax,
-        color=plot_colors,
-        edgecolor=(0, 0, 0, 0.25),
-        linewidth=0.6,
-        markersize=6,
-        alpha=0.75,
-    )
+    geom_types = set(gdf_3857.geom_type.dropna().unique())
+    if geom_types and geom_types <= {"Point", "MultiPoint"}:
+        # Puntos: tamaño auto (según nº y lienzo) y halo blanco para que
+        # resalten sobre basemaps ocupados (satelital/híbrido).
+        ms = float(markersize) if markersize else _auto_markersize(len(gdf_3857), fw)
+        gdf_3857.plot(
+            ax=ax,
+            color=plot_colors,
+            edgecolor="white",
+            linewidth=1.2,
+            markersize=ms,
+            alpha=0.95,
+        )
+        extra_notes.append(
+            f"puntos de la capa principal: markersize={ms:.0f} pt² "
+            + ("(explícito)" if markersize else "(auto por nº de puntos y lienzo)")
+        )
+    else:
+        gdf_3857.plot(
+            ax=ax,
+            color=plot_colors,
+            edgecolor=(0, 0, 0, 0.25),
+            linewidth=0.6,
+            markersize=float(markersize) if markersize else 6,
+            alpha=0.75,
+        )
 
     # --- Extensión de la vista ---
     # Con filtro por atributo manda el subset filtrado (gdf ya viene filtrado);
@@ -1533,6 +1568,7 @@ def export_map_cartographic(
     extra_layers: Optional[list[dict]] = None,
     source_crs: Optional[str] = None,
     basemap: Optional[str] = None,
+    markersize: Optional[float] = None,
 ) -> list[TextContent | ImageContent]:
     """
     Genera un mapa cartográfico técnico con layout formal completo:
@@ -1579,6 +1615,9 @@ def export_map_cartographic(
                      raíz de un ArcGIS MapServer con cache de tiles en Web
                      Mercator o plantilla XYZ con tokens {z}/{x}/{y}.
                      Ver export_map_image.
+        markersize:  Tamaño del marcador para capas de puntos, en pt².
+                     Default None = automático según número de puntos y ancho
+                     del lienzo, con halo blanco. Ver export_map_image.
     """
     import os
     import warnings
@@ -1671,14 +1710,31 @@ def export_map_cartographic(
     extra_gdfs, extra_handles, extra_notes = _plot_extra_layers(ax_map, extra_layers)
 
     # ── Capa principal ────────────────────────────────────────────────────────
-    gdf_3857.plot(
-        ax=ax_map,
-        color=plot_colors,
-        edgecolor=(0, 0, 0, 0.22),
-        linewidth=0.6,
-        markersize=6,
-        alpha=0.80,
-    )
+    geom_types = set(gdf_3857.geom_type.dropna().unique())
+    if geom_types and geom_types <= {"Point", "MultiPoint"}:
+        # Puntos: tamaño auto y halo blanco (el mapa ocupa ~75 % del ancho)
+        ms = float(markersize) if markersize else _auto_markersize(len(gdf_3857), fw * 0.75)
+        gdf_3857.plot(
+            ax=ax_map,
+            color=plot_colors,
+            edgecolor="white",
+            linewidth=1.2,
+            markersize=ms,
+            alpha=0.95,
+        )
+        extra_notes.append(
+            f"puntos de la capa principal: markersize={ms:.0f} pt² "
+            + ("(explícito)" if markersize else "(auto por nº de puntos y lienzo)")
+        )
+    else:
+        gdf_3857.plot(
+            ax=ax_map,
+            color=plot_colors,
+            edgecolor=(0, 0, 0, 0.22),
+            linewidth=0.6,
+            markersize=float(markersize) if markersize else 6,
+            alpha=0.80,
+        )
 
     # ── Ajustar extent del mapa para eliminar espacios en blanco ─────────────
     # Con filtro por atributo (where), la extensión de las features filtradas
