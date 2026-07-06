@@ -1351,7 +1351,10 @@ def export_map_image(
         b = gdf_3857.total_bounds  # [xmin, ymin, xmax, ymax]
         dx = max(float(b[2] - b[0]), 1.0)
         dy = max(float(b[3] - b[1]), 1.0)
-        ratio = dy / dx
+        # Ratio acotado: con datos muy alargados (corredores) la figura no se
+        # vuelve esbelta; el sobrante queda como aire lateral/vertical para
+        # que leyenda, escala y atribución no se monten sobre los datos.
+        ratio = min(max(dy / dx, 0.45), 1.6)
         fw = 10.0 / max(ratio, 1.0) if ratio >= 1.0 else 10.0
         fh = fw * ratio
         fw = max(5.0, min(fw, 14.0))
@@ -1361,7 +1364,7 @@ def export_map_image(
     ax.set_facecolor("#e8e5e0")
 
     # --- Capas adicionales (debajo de la principal) ---
-    _, extra_handles, extra_notes = _plot_extra_layers(ax, extra_layers)
+    extra_gdfs, extra_handles, extra_notes = _plot_extra_layers(ax, extra_layers)
 
     # --- Capa principal ---
     gdf_3857.plot(
@@ -1373,16 +1376,36 @@ def export_map_image(
         alpha=0.75,
     )
 
-    # --- Extensión: con filtro por atributo, el subset filtrado manda ---
-    # Sin esto matplotlib autoescala a todas las capas (incluidas las extra de
-    # contexto) y el zoom no refleja el filtro pedido por el usuario.
-    if where:
-        fb = gdf_3857.total_bounds
-        pad_x = max((fb[2] - fb[0]) * 0.08, 250.0)
-        pad_y = max((fb[3] - fb[1]) * 0.08, 250.0)
-        ax.set_aspect("equal", adjustable="box")
-        ax.set_xlim(fb[0] - pad_x, fb[2] + pad_x)
-        ax.set_ylim(fb[1] - pad_y, fb[3] + pad_y)
+    # --- Extensión de la vista ---
+    # Con filtro por atributo manda el subset filtrado (gdf ya viene filtrado);
+    # sin filtro se incluyen las capas extra. La vista se expande luego al
+    # aspect ratio del axes: en capas muy alargadas eso deja aire lateral o
+    # vertical para que leyenda, escala y atribución no se monten sobre los datos.
+    vb = gdf_3857.total_bounds.copy()
+    if not where:
+        for _e3857 in extra_gdfs:
+            _eb = _e3857.total_bounds
+            vb[0] = min(vb[0], _eb[0])
+            vb[1] = min(vb[1], _eb[1])
+            vb[2] = max(vb[2], _eb[2])
+            vb[3] = max(vb[3], _eb[3])
+    pad_x = max((vb[2] - vb[0]) * 0.08, 250.0)
+    pad_y = max((vb[3] - vb[1]) * 0.08, 250.0)
+    dx_v = (vb[2] - vb[0]) + 2 * pad_x
+    dy_v = (vb[3] - vb[1]) + 2 * pad_y
+    # original=True: la posición activa ya viene encogida por el aspecto igual
+    # de los datos y daría un ratio equivocado.
+    _pos = ax.get_position(original=True)
+    ax_ar = (_pos.width * fw) / (_pos.height * fh)  # ancho/alto del axes
+    if dx_v / dy_v < ax_ar:
+        dx_v = dy_v * ax_ar
+    else:
+        dy_v = dx_v / ax_ar
+    xc = (vb[0] + vb[2]) / 2
+    yc = (vb[1] + vb[3]) / 2
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlim(xc - dx_v / 2, xc + dx_v / 2)
+    ax.set_ylim(yc - dy_v / 2, yc + dy_v / 2)
 
     # --- Basemap ---
     bm_fallback = _add_basemap(ax, gdf_3857.crs, bm_source, bm_attr, basemap)
