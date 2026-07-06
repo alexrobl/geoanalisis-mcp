@@ -1066,6 +1066,14 @@ def _mercator_lat_correction(y_center_m: float) -> float:
     return math.cos(lat)
 
 
+def _merc_to_wgs84(x: float, y: float) -> tuple:
+    """Coordenada Web Mercator (EPSG:3857, m) → (lon, lat) WGS84."""
+    import math
+    lon = math.degrees(x / 6378137.0)
+    lat = math.degrees(math.atan(math.sinh(y / 6378137.0)))
+    return lon, lat
+
+
 def _add_scalebar(ax) -> None:
     """Barra de escala en esquina inferior izquierda (ejes en metros, EPSG:3857)."""
     import matplotlib.patches as mpatches
@@ -1983,6 +1991,11 @@ def export_map_cartographic(
     _world = _try_naturalearth()
 
     if _world is not None:
+        # Fondo azul océano (parche explícito: axis("off") oculta el facecolor)
+        ax_loc.add_patch(mpatches.Rectangle(
+            (0, 0), 1, 1, transform=ax_loc.transAxes,
+            facecolor="#cfe3f2", edgecolor="none", zorder=0,
+        ))
         _world.to_crs(epsg=4326).plot(
             ax=ax_loc, color="#d8d8d8", edgecolor="#aaa", linewidth=0.25,
         )
@@ -2040,50 +2053,22 @@ def export_map_cartographic(
         ha="center", va="center", fontsize=10, color="#111", fontweight="bold",
     )
 
-    # ─ Barra de escala (centro, x 0.07→0.36) ─────────────────────────────────
-    b3857    = gdf_3857.total_bounds
-    _corr    = _mercator_lat_correction((b3857[1] + b3857[3]) / 2)
-    map_w_m  = abs(b3857[2] - b3857[0]) * 1.2 * _corr
-    nice_vals = [
-        1, 2, 5, 10, 25, 50, 100, 200, 500, 1000, 2000, 5000,
-        10000, 20000, 50000, 100000, 200000, 500000, 1000000,
-    ]
-    target_m = map_w_m * 0.25
-    bar_m    = min(nice_vals, key=lambda v: abs(v - target_m))
-    bar_lbl  = f"{bar_m:,} m" if bar_m < 1000 else f"{bar_m // 1000:,} km"
-
-    # El bloque de la escala ocupa x=0.07..0.36 del axes (29 % del total)
-    # Dibujamos la barra en x=0.10..0.32 del axes, centrada en esa banda
-    sb_x0 = 0.10
-    sb_x1 = 0.33
-    sb_mid = (sb_x0 + sb_x1) / 2
-    sb_w   = sb_x1 - sb_x0
-    sb_y   = 0.52
-    sb_h   = 0.22
-    for i, fc in enumerate(["#111", "#eee"]):
-        ax_bottom.add_patch(mpatches.Rectangle(
-            (sb_x0 + i * sb_w / 2, sb_y - sb_h / 2), sb_w / 2, sb_h,
-            transform=ax_bottom.transAxes,
-            facecolor=fc, edgecolor="#111", linewidth=0.5, zorder=10,
-        ))
-    ax_bottom.text(sb_x0, sb_y + sb_h * 0.65, "0",
-                   transform=ax_bottom.transAxes,
-                   ha="center", va="bottom", fontsize=7.5, color="#111")
-    ax_bottom.text(sb_mid, sb_y + sb_h * 0.65, bar_lbl,
-                   transform=ax_bottom.transAxes,
-                   ha="center", va="bottom", fontsize=7.5, color="#111")
-    ax_bottom.text(sb_mid, 0.14, "ESCALA GRÁFICA",
-                   transform=ax_bottom.transAxes,
-                   ha="center", va="center", fontsize=6.5, color="#444")
+    # ─ Barra de escala (centro, x 0.07→0.36): se dibuja al FINAL, tras
+    #   subplots_adjust — la barra debe medir exactamente su rótulo sobre el
+    #   papel y eso requiere las posiciones definitivas de los axes. ──────────
 
     # ─ Parámetros / fuente (derecha, x 0.36→1.00) ────────────────────────────
     credit_text = credits or "Fuente: [No especificada] | Elaborado con GeoAnalisis MCP"
-    wb84        = gdf_wgs84.total_bounds
+    # Extensión de la VISTA renderizada (no de la capa: con un solo feature
+    # los bounds de la capa son degenerados y no describen el mapa).
+    _vxl, _vyl = ax_map.get_xlim(), ax_map.get_ylim()
+    _vw, _vs = _merc_to_wgs84(_vxl[0], _vyl[0])
+    _ve, _vn = _merc_to_wgs84(_vxl[1], _vyl[1])
     params_lines = [
         credit_text,
         f"CRS datos: {crs_orig}  |  Renderizado: WGS84 Pseudo-Mercator EPSG:3857",
-        (f"Ext: [{wb84[0]:.4f}, {wb84[1]:.4f}, "
-         f"{wb84[2]:.4f}, {wb84[3]:.4f}]  (WGS84)"),
+        (f"Vista: [{_vw:.4f}, {_vs:.4f}, "
+         f"{_ve:.4f}, {_vn:.4f}]  (WGS84)"),
         f"Generado: {date.today().isoformat()}  |  GeoAnalisis MCP",
     ]
     for k, line in enumerate(params_lines):
@@ -2111,6 +2096,54 @@ def export_map_cartographic(
         top=0.990,  bottom=0.010,
         hspace=0.0, wspace=0.0,
     )
+
+    # ── Escala gráfica y numérica (tras el layout final) ─────────────────────
+    # La barra se dibuja con la longitud de papel que corresponde EXACTAMENTE
+    # a su rótulo: metros reales visibles (vista en 3857 × cos(lat)) mapeados
+    # a fracción de figura vía la posición definitiva de ax_map.
+    import math as _math
+    fig.canvas.draw()  # fuerza apply_aspect: posiciones definitivas
+    _pos_map = ax_map.get_position()
+    _pos_bot = ax_bottom.get_position()
+    _xl, _yl = ax_map.get_xlim(), ax_map.get_ylim()
+    _corr    = _mercator_lat_correction((_yl[0] + _yl[1]) / 2)
+    view_w_m = abs(_xl[1] - _xl[0]) * _corr            # metros reales visibles
+    m_per_ffrac = view_w_m / max(_pos_map.width, 1e-9)  # m por fracción de ancho de figura
+    nice_vals = [1, 2, 5, 10, 25, 50, 100, 200, 500, 1000, 2000, 5000,
+                 10000, 20000, 50000, 100000, 200000, 500000, 1000000]
+    # El mayor valor "bonito" que quepa en la banda de escala (x 0.10→0.33)
+    _band_ffrac = 0.23 * _pos_bot.width
+    bar_m = max((v for v in nice_vals if v / m_per_ffrac <= _band_ffrac),
+                default=nice_vals[0])
+    bar_ax_frac = (bar_m / m_per_ffrac) / max(_pos_bot.width, 1e-9)
+    bar_lbl = (f"{bar_m:,} m" if bar_m < 1000
+               else f"{bar_m // 1000:,} km").replace(",", ".")
+
+    sb_x0, sb_y, sb_h = 0.10, 0.52, 0.22
+    for i, fc in enumerate(["#111", "#eee"]):
+        ax_bottom.add_patch(mpatches.Rectangle(
+            (sb_x0 + i * bar_ax_frac / 2, sb_y - sb_h / 2), bar_ax_frac / 2, sb_h,
+            transform=ax_bottom.transAxes,
+            facecolor=fc, edgecolor="#111", linewidth=0.5, zorder=10,
+        ))
+    ax_bottom.text(sb_x0, sb_y + sb_h * 0.65, "0",
+                   transform=ax_bottom.transAxes,
+                   ha="center", va="bottom", fontsize=7.5, color="#111")
+    ax_bottom.text(sb_x0 + bar_ax_frac, sb_y + sb_h * 0.65, bar_lbl,
+                   transform=ax_bottom.transAxes,
+                   ha="center", va="bottom", fontsize=7.5, color="#111")
+
+    # Escala numérica: metros reales / metros de papel del área del mapa,
+    # redondeada a 2 cifras significativas (por eso "APROX.").
+    map_w_in = _pos_map.width * fw
+    denom = view_w_m / max(map_w_in * 0.0254, 1e-9)
+    _mag = 10 ** max(int(_math.floor(_math.log10(max(denom, 1.0)))) - 1, 0)
+    denom_r = int(round(denom / _mag) * _mag)
+    esc_lbl = f"1:{denom_r:,}".replace(",", ".")
+    ax_bottom.text((0.07 + 0.36) / 2, 0.14,
+                   f"ESCALA GRÁFICA  ·  APROX. {esc_lbl}",
+                   transform=ax_bottom.transAxes,
+                   ha="center", va="center", fontsize=6.5, color="#444")
 
     # ── Etiquetas (tras el layout final: la detección de colisiones usa
     #     coordenadas de pantalla, que cambian con subplots_adjust) ───────────
