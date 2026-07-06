@@ -1192,7 +1192,9 @@ def export_map_image(
         limit:         Máximo de features (default 5000).
         color_by:      Campo para colorear por categoría con colores automáticos.
                        Alternativa simple a `style`.
-        where:         Filtro SQL OGR.
+        where:         Filtro SQL OGR. Si se aplica, la extensión del mapa se ajusta
+                       (zoom) a las features filtradas; las capas extra quedan como
+                       contexto recortado sin ampliar la vista.
         bbox:          Extensión [xmin, ymin, xmax, ymax].
         style:         Estilo avanzado:
                          Categorizado: {"type": "categorized", "field": "Tipo",
@@ -1286,6 +1288,17 @@ def export_map_image(
         markersize=6,
         alpha=0.75,
     )
+
+    # --- Extensión: con filtro por atributo, el subset filtrado manda ---
+    # Sin esto matplotlib autoescala a todas las capas (incluidas las extra de
+    # contexto) y el zoom no refleja el filtro pedido por el usuario.
+    if where:
+        fb = gdf_3857.total_bounds
+        pad_x = max((fb[2] - fb[0]) * 0.08, 250.0)
+        pad_y = max((fb[3] - fb[1]) * 0.08, 250.0)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlim(fb[0] - pad_x, fb[2] + pad_x)
+        ax.set_ylim(fb[1] - pad_y, fb[3] + pad_y)
 
     # --- Basemap ---
     cx.add_basemap(
@@ -1389,7 +1402,9 @@ def export_map_cartographic(
         layer:       Nombre de la capa (None = primera capa).
         limit:       Máximo de features (default 5000).
         color_by:    Campo para colorear por categoría (colores automáticos).
-        where:       Filtro SQL OGR.
+        where:       Filtro SQL OGR. Si se aplica, la extensión del mapa se ajusta
+                     (zoom) a las features filtradas; las capas extra quedan como
+                     contexto recortado sin ampliar la vista.
         bbox:        Extensión [xmin, ymin, xmax, ymax] en el CRS de la capa.
         style:       Estilo avanzado (mismo formato que export_map_image):
                        Categorizado: {"type":"categorized","field":"X",
@@ -1512,17 +1527,20 @@ def export_map_cartographic(
     )
 
     # ── Ajustar extent del mapa para eliminar espacios en blanco ─────────────
-    # Bounds combinados de todas las capas ya dibujadas (extras cacheadas arriba)
+    # Con filtro por atributo (where), la extensión de las features filtradas
+    # tiene prioridad: las capas extra quedan como contexto recortado. Sin
+    # filtro, se combinan los bounds de todas las capas dibujadas.
     _b = gdf_3857.total_bounds.copy()
-    for _e3857 in extra_gdfs:
-        _eb3 = _e3857.total_bounds
-        _b[0] = min(_b[0], _eb3[0])
-        _b[1] = min(_b[1], _eb3[1])
-        _b[2] = max(_b[2], _eb3[2])
-        _b[3] = max(_b[3], _eb3[3])
+    if not where:
+        for _e3857 in extra_gdfs:
+            _eb3 = _e3857.total_bounds
+            _b[0] = min(_b[0], _eb3[0])
+            _b[1] = min(_b[1], _eb3[1])
+            _b[2] = max(_b[2], _eb3[2])
+            _b[3] = max(_b[3], _eb3[3])
 
-    _pad_x = (_b[2] - _b[0]) * 0.08
-    _pad_y = (_b[3] - _b[1]) * 0.08
+    _pad_x = max((_b[2] - _b[0]) * 0.08, 250.0)
+    _pad_y = max((_b[3] - _b[1]) * 0.08, 250.0)
     _xc = (_b[0] + _b[2]) / 2
     _yc = (_b[1] + _b[3]) / 2
     _dx = (_b[2] - _b[0]) + 2 * _pad_x
