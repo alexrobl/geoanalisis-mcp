@@ -775,18 +775,19 @@ _BASEMAP_DEFAULT_ATTR = "© OpenStreetMap contributors © CARTO"
 
 
 def _resolve_basemap(basemap: Optional[str]) -> tuple:
-    """Resuelve el parámetro `basemap` a (source, attribution, nota_reporte).
+    """Resuelve el parámetro `basemap` a (source, attribution, nota, max_zoom).
 
     source None → usar el default CartoDB Positron. Acepta plantillas XYZ con
     tokens {z}/{x}/{y} tal cual, o la raíz de un ArcGIS MapServer con cache de
-    tiles en Web Mercator (se valida vía ?f=json y se usa /tile/{z}/{y}/{x}).
+    tiles en Web Mercator (se valida vía ?f=json y se usa /tile/{z}/{y}/{x});
+    max_zoom None → decidir según el proveedor.
     """
     if not basemap:
-        return None, _BASEMAP_DEFAULT_ATTR, None
+        return None, _BASEMAP_DEFAULT_ATTR, None, None
 
     url = basemap.strip().rstrip("/")
     if "{z}" in url:
-        return url, None, f"basemap personalizado (plantilla XYZ): {url}"
+        return url, None, f"basemap personalizado (plantilla XYZ): {url}", None
 
     if "/mapserver" not in url.lower():
         raise ValueError(
@@ -820,22 +821,61 @@ def _resolve_basemap(basemap: Optional[str]) -> tuple:
         )
     lods = tile_info.get("lods") or []
     levels = f"niveles {lods[0]['level']}–{lods[-1]['level']}" if lods else "niveles ?"
+    max_zoom = int(lods[-1]["level"]) if lods else None
     attribution = (meta.get("copyrightText") or "").strip() or None
     name = meta.get("mapName") or url.rsplit("/rest/services/", 1)[-1]
     note = f"basemap: ArcGIS tile cache '{name}' ({levels}) — {url}"
-    return url + "/tile/{z}/{y}/{x}", attribution, note
+    return url + "/tile/{z}/{y}/{x}", attribution, note, max_zoom
 
 
-def _add_basemap(ax, crs, source, attribution, requested: Optional[str]) -> Optional[str]:
-    """add_basemap con fallback a CartoDB Positron si el basemap pedido falla."""
+_WEB_MERCATOR_RES0 = 156543.03392804097  # m/px de un tile 256px a zoom 0
+_BASEMAP_MAX_TILES = 240                 # tope de descarga por render (~90 s peor caso)
+
+
+def _basemap_zoom(ax, ax_width_in: float, dpi: int, max_zoom: int) -> int:
+    """Zoom cuyo píxel de tile ≈ píxel de salida a `dpi` (basemap nítido).
+
+    Acota por `max_zoom` del proveedor y por _BASEMAP_MAX_TILES para no
+    disparar la descarga en extensiones grandes.
+    """
+    import math
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    dx = max(x1 - x0, 1.0)
+    dy = max(y1 - y0, 1.0)
+    target_px = max(ax_width_in, 1.0) * dpi
+    z = math.ceil(math.log2(max(target_px, 256.0) * _WEB_MERCATOR_RES0 / dx))
+    z = max(1, min(z, max_zoom))
+    while z > 1:
+        tile_m = 256.0 * _WEB_MERCATOR_RES0 / (2 ** z)
+        if (dx / tile_m) * (dy / tile_m) <= _BASEMAP_MAX_TILES:
+            break
+        z -= 1
+    return z
+
+
+def _add_basemap(ax, crs, source, attribution, requested: Optional[str],
+                 dpi: int = 150, ax_width_in: float = 0.0,
+                 max_zoom: Optional[int] = None) -> Optional[str]:
+    """add_basemap con fallback a CartoDB Positron si el basemap pedido falla.
+
+    Con dpi > 150 pide los tiles al zoom que iguala el píxel de salida
+    (en vez del "auto" de contextily, pensado para pantalla) y lo reporta.
+    """
     import contextily as cx
+    if source is None:
+        source = cx.providers.CartoDB.Positron
+    if max_zoom is None:
+        max_zoom = source.get("max_zoom", 19) if isinstance(source, dict) else 19
+    zoom = "auto"
+    zoom_note = None
+    if dpi > 150 and ax_width_in > 0:
+        zoom = _basemap_zoom(ax, ax_width_in, dpi, max_zoom)
+        zoom_note = (f"basemap: tiles a zoom {zoom} (máx. proveedor {max_zoom}) "
+                     f"para dpi={dpi}")
     try:
-        cx.add_basemap(
-            ax, crs=crs,
-            source=source or cx.providers.CartoDB.Positron,
-            attribution=attribution,
-        )
-        return None
+        cx.add_basemap(ax, crs=crs, source=source, attribution=attribution, zoom=zoom)
+        return zoom_note
     except Exception as exc:
         if not requested:
             raise
@@ -1285,6 +1325,8 @@ def export_map_image(
         legend:        Mostrar leyenda (default True).
         dpi:           Resolución en DPI para disco (default 150). La imagen inline del chat
                        siempre usa 72 DPI para mantener el tamaño manejable.
+                       Con dpi > 150 los tiles del basemap se piden a mayor zoom
+                       para mantener la nitidez (descarga más tiles: más lento).
         figsize:       Tamaño [ancho, alto] en pulgadas, ej. [14, 8.5] para A4 horizontal.
                        Default [10, 6].
         scalebar:      Mostrar barra de escala en esquina inferior izquierda (default True).
@@ -1330,7 +1372,7 @@ def export_map_image(
     if bbox and len(bbox) != 4:
         raise ValueError("bbox debe ser [xmin, ymin, xmax, ymax].")
 
-    bm_source, bm_attr, bm_note = _resolve_basemap(basemap)
+    bm_source, bm_attr, bm_note, bm_maxz = _resolve_basemap(basemap)
 
     gdf = _read_gdf(path, layer, limit, where, bbox)
     if gdf.empty:
@@ -1408,8 +1450,9 @@ def export_map_image(
     ax.set_ylim(yc - dy_v / 2, yc + dy_v / 2)
 
     # --- Basemap ---
-    bm_fallback = _add_basemap(ax, gdf_3857.crs, bm_source, bm_attr, basemap)
-    extra_notes.extend(n for n in (bm_note, bm_fallback) if n)
+    bm_extra = _add_basemap(ax, gdf_3857.crs, bm_source, bm_attr, basemap,
+                            dpi=dpi, ax_width_in=_pos.width * fw, max_zoom=bm_maxz)
+    extra_notes.extend(n for n in (bm_note, bm_extra) if n)
     ax.set_axis_off()
     ax.add_patch(mpatches.Rectangle(
         (0, 0), 1, 1,
@@ -1517,7 +1560,9 @@ def export_map_cartographic(
                                       "ramp":"RdYlGn_r","breaks":5}
         output_path: Ruta de salida. .jpg para trabajo, .pdf para entrega.
                      Default: "{capa}_cartographic.jpg" junto al archivo fuente.
-        dpi:         Resolución (default 150).
+        dpi:         Resolución (default 150). Con dpi > 150 los tiles del
+                     basemap se piden a mayor zoom para mantener la nitidez
+                     (descarga más tiles: más lento).
         figsize:     [ancho, alto] en pulgadas. Default auto-calculado.
         title:       Título del mapa. Default: nombre de la capa.
         credits:     Texto de fuente/créditos para el panel inferior.
@@ -1548,7 +1593,7 @@ def export_map_cartographic(
     if bbox and len(bbox) != 4:
         raise ValueError("bbox debe ser [xmin, ymin, xmax, ymax].")
 
-    bm_source, bm_attr, bm_note = _resolve_basemap(basemap)
+    bm_source, bm_attr, bm_note, bm_maxz = _resolve_basemap(basemap)
 
     # ── Leer datos ────────────────────────────────────────────────────────────
     gdf = _read_gdf(path, layer, limit, where, bbox)
@@ -1666,8 +1711,11 @@ def export_map_cartographic(
     ax_map.set_ylim(_yc - _dy / 2, _yc + _dy / 2)
 
     # ── Basemap (default CartoDB Positron; ver parámetro `basemap`) ──────────
-    bm_fallback = _add_basemap(ax_map, gdf_3857.crs, bm_source, bm_attr, basemap)
-    extra_notes.extend(n for n in (bm_note, bm_fallback) if n)
+    _map_pos = ax_map.get_position(original=True)
+    bm_extra = _add_basemap(ax_map, gdf_3857.crs, bm_source, bm_attr, basemap,
+                            dpi=dpi, ax_width_in=_map_pos.width * fw,
+                            max_zoom=bm_maxz)
+    extra_notes.extend(n for n in (bm_note, bm_extra) if n)
     ax_map.set_axis_off()
 
     # ── PANEL LATERAL ─────────────────────────────────────────────────────────
