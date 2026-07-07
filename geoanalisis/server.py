@@ -1630,11 +1630,14 @@ def export_map_image(
         # Ratio acotado: con datos muy alargados (corredores) la figura no se
         # vuelve esbelta; el sobrante queda como aire lateral/vertical para
         # que leyenda, escala y atribución no se monten sobre los datos.
+        # Base 12 in: homologado con el área de mapa de export_map_cartographic
+        # (fw 16 × 75 % ≈ 12 in) para que ambos exports salgan con la misma
+        # resolución efectiva a igual dpi.
         ratio = min(max(dy / dx, 0.45), 1.6)
-        fw = 10.0 / max(ratio, 1.0) if ratio >= 1.0 else 10.0
+        fw = 12.0 / max(ratio, 1.0) if ratio >= 1.0 else 12.0
         fh = fw * ratio
-        fw = max(5.0, min(fw, 14.0))
-        fh = max(5.0, min(fh, 12.0))
+        fw = max(7.0, min(fw, 16.0))
+        fh = max(6.0, min(fh, 12.0))
     fig, ax = plt.subplots(figsize=(fw, fh))
     fig.patch.set_facecolor("#f5f4f1")
     ax.set_facecolor("#e8e5e0")
@@ -1724,12 +1727,15 @@ def export_map_image(
     _sort_legend_patches(legend_patches, _style_type)
     all_handles = (legend_patches or []) + extra_handles
     if legend and all_handles:
+        # loc="best" evalúa las 4 esquinas y elige la de menor solape con las
+        # features dibujadas (líneas, puntos, polígonos); el raster del basemap
+        # no cuenta. Con lower right fijo la leyenda tapaba datos.
         ax.legend(
             handles=all_handles,
             title=effective_field,
             title_fontsize=10,
             fontsize=9,
-            loc="lower right",
+            loc="best",
             framealpha=0.93,
             edgecolor="#cccccc",
         )
