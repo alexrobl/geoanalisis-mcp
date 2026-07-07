@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "geoanalisis-mcp",
   "display_name": "GeoAnalisis",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Análisis y cartografía de datos espaciales vectoriales (FileGDB, Shapefile, GeoJSON, GeoPackage, KML) directamente en Claude.",
   "long_description": "Lee y analiza archivos espaciales vectoriales locales con GDAL/OGR: inspección de capas y esquemas, estadísticas por campo, lectura de features con filtros, mapas interactivos HTML y exportación de mapas cartográficos (simbología, leyenda, escala gráfica, norte y grilla de coordenadas). Reproyección automática con manejo robusto de CRS, pensado para flujos de trabajo GIS en español.",
   "author": {
