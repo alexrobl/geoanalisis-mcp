@@ -177,13 +177,17 @@ def _js_embed(s: str) -> str:
     return s.replace("</", "<\\/")
 
 
-def _geojson_for_render(gdf: gpd.GeoDataFrame) -> tuple[str, str | None]:
+def _geojson_for_render(
+    gdf: gpd.GeoDataFrame,
+    max_chars: int = _MAX_GEOJSON_CHARS,
+) -> tuple[str, str | None]:
     """
     Convierte un GeoDataFrame a GeoJSON string apto para embeber en HTML.
 
     Aplica simplificación geométrica progresiva hasta que el resultado cabe
-    dentro de _MAX_GEOJSON_CHARS. Si con la máxima simplificación sigue siendo
-    demasiado grande, reduce el número de features y lo indica en el warning.
+    dentro de `max_chars`. Si con la máxima simplificación sigue siendo
+    demasiado grande, reduce el número de features (muestreo uniforme, no
+    los primeros N: evita vaciar una zona del mapa) y lo indica en el warning.
 
     Returns:
         (geojson_str, warning_message | None)
@@ -204,7 +208,7 @@ def _geojson_for_render(gdf: gpd.GeoDataFrame) -> tuple[str, str | None]:
             )
 
         js = g.to_json(na="null")
-        if len(js) <= _MAX_GEOJSON_CHARS:
+        if len(js) <= max_chars:
             warn = (
                 f"Geometrías simplificadas (tolerancia {tol}°) para ajustar al límite de tamaño."
                 if tol > 0.0 else None
@@ -214,15 +218,131 @@ def _geojson_for_render(gdf: gpd.GeoDataFrame) -> tuple[str, str | None]:
     # Aún demasiado grande: reducir número de features progresivamente
     for ratio in [0.5, 0.25, 0.1]:
         n = max(1, int(n_original * ratio))
-        g = gdf.iloc[:n].copy()
+        idx = np.linspace(0, n_original - 1, n).astype(int)
+        g = gdf.iloc[idx].copy()
         g["geometry"] = g["geometry"].simplify(0.01, preserve_topology=True)
         js = g.to_json(na="null")
-        if len(js) <= _MAX_GEOJSON_CHARS:
-            return js, f"Se renderizaron {n} de {n_original} features por límite de tamaño."
+        if len(js) <= max_chars:
+            return js, f"Se renderizaron {n} de {n_original} features (muestreo uniforme) por límite de tamaño."
 
     # Fallback final
-    g = gdf.iloc[:50].copy()
-    return g.to_json(na="null"), f"Se renderizaron 50 de {n_original} features por límite de tamaño."
+    idx = np.linspace(0, n_original - 1, min(50, n_original)).astype(int)
+    g = gdf.iloc[idx].copy()
+    return g.to_json(na="null"), f"Se renderizaron {len(g)} de {n_original} features (muestreo uniforme) por límite de tamaño."
+
+
+_DYN_CSS = """<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;font-family:sans-serif}
+#ga-hdr{padding:6px 16px;background:rgba(255,255,255,.97);font:bold 13px sans-serif;
+  text-align:center;box-shadow:0 1px 5px rgba(0,0,0,.18);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#222}
+#map{height:calc(100% - 31px);background:#e8e5e0}
+.leaflet-container{background:#e8e5e0}
+.ga-legend{background:rgba(255,255,255,.93);padding:9px 11px;border-radius:7px;
+  box-shadow:0 1px 5px rgba(0,0,0,.2);font-size:11px;
+  max-height:200px;overflow-y:auto;min-width:110px}
+.ga-lt{font-weight:700;margin-bottom:5px;color:#333}
+.ga-li{display:flex;align-items:center;gap:5px;margin:2px 0}
+.ga-sw{width:12px;height:12px;border-radius:2px;flex-shrink:0}
+.ga-lb{color:#444;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
+.ga-coords{background:rgba(255,255,255,.85);padding:2px 7px;border-radius:4px;
+  font:11px monospace;color:#333}
+.leaflet-control-layers{font-size:12px}
+</style>
+"""
+
+_DYN_JS = """
+const esc = s => String(s).replace(/[&<>"'`]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c]));
+
+const map = L.map('map', {maxZoom: (CFG.basemap && CFG.basemap.maxZoom) || 19});
+if (CFG.basemap) {
+  L.tileLayer(CFG.basemap.url, {
+    maxZoom: (CFG.basemap.maxZoom || 19),
+    attribution: CFG.basemap.att || '',
+  }).addTo(map);
+}
+L.control.scale({imperial: false}).addTo(map);
+
+function popupHTML(p) {
+  const rows = Object.entries(p || {})
+    .filter(([k, v]) => !k.startsWith('__ga') && v != null && v !== '')
+    .slice(0, 12)
+    .map(([k, v]) => `<tr><td style="font-weight:600;padding-right:8px;white-space:nowrap;color:#555">${esc(k)}</td><td>${esc(v)}</td></tr>`)
+    .join('');
+  return rows ? `<table style="font-size:12px;border-collapse:collapse;line-height:1.5">${rows}</table>` : '';
+}
+
+const overlays = {};
+
+CFG.extras.forEach(e => {
+  const lyr = L.geoJSON(e.gj, {
+    style: () => ({color: e.color, fillColor: e.color, weight: e.weight,
+                   dashArray: e.dash || null, opacity: 0.9, fillOpacity: e.alpha}),
+    pointToLayer: (f, ll) => L.circleMarker(ll, {radius: e.radius, fillColor: e.color,
+                   color: '#fff', weight: 1, fillOpacity: 0.9}),
+    onEachFeature: (f, l) => { const h = popupHTML(f.properties); if (h) l.bindPopup(h); },
+  }).addTo(map);
+  overlays[esc(e.label)] = lyr;
+});
+
+const mc = f => (f.properties && f.properties.__ga_c) || CFG.main.defColor;
+const mainLayer = L.geoJSON(CFG.main.gj, {
+  style: f => ({color: mc(f), fillColor: mc(f), weight: 1.2, opacity: 0.9, fillOpacity: 0.65}),
+  pointToLayer: (f, ll) => L.circleMarker(ll, {radius: CFG.main.radius, fillColor: mc(f),
+                 color: '#fff', weight: 1.5, fillOpacity: 0.95}),
+  onEachFeature: (f, l) => {
+    const p = f.properties || {};
+    const h = popupHTML(p);
+    if (h) l.bindPopup(h);
+    if (CFG.main.labelBy && p[CFG.main.labelBy] != null)
+      l.bindTooltip(esc(p[CFG.main.labelBy]),
+                    {permanent: CFG.main.permanent, direction: 'top', offset: [0, -6]});
+  },
+}).addTo(map);
+overlays[esc(CFG.main.label)] = mainLayer;
+
+if (Object.keys(overlays).length > 1)
+  L.control.layers(null, overlays, {collapsed: false}).addTo(map);
+
+// maxZoom acota el zoom inicial cuando la capa es un solo punto o muy pequeña
+// (sin él, fitBounds salta al zoom máximo del proveedor y se pierde el contexto)
+try { map.fitBounds(mainLayer.getBounds(), {padding: [20, 20], maxZoom: 17}); }
+catch (err) { map.setView([4.6, -74.08], 5); }
+
+if (CFG.legend && CFG.legend.items.length) {
+  const legend = L.control({position: 'bottomright'});
+  legend.onAdd = () => {
+    const d = L.DomUtil.create('div', 'ga-legend');
+    d.innerHTML = '<div class="ga-lt">' + esc(CFG.legend.title) + '</div>' +
+      CFG.legend.items.map(i => `<div class="ga-li"><span class="ga-sw" style="background:${esc(i.color)}"></span><span class="ga-lb">${esc(i.label)}</span></div>`).join('');
+    return d;
+  };
+  legend.addTo(map);
+}
+
+const coords = L.control({position: 'bottomleft'});
+coords.onAdd = () => L.DomUtil.create('div', 'ga-coords');
+coords.addTo(map);
+map.on('mousemove', ev => {
+  const d = document.querySelector('.ga-coords');
+  if (d) d.textContent = ev.latlng.lat.toFixed(5) + ', ' + ev.latlng.lng.toFixed(5);
+});
+"""
+
+_DYN_DASH = {"--": "8 5", ":": "2 5", "-.": "10 4 2 4"}
+
+_DYN_EXTRA_KEYS = {"path", "layer", "limit", "color", "alpha", "linewidth",
+                   "linestyle", "label", "crs", "markersize"}
+
+# CartoDB Positron (mismo default que los exports); attribution literal porque
+# _BASEMAP_DEFAULT_ATTR se define más abajo en el módulo.
+_DYN_BASEMAP_DEFAULT = {
+    "url": "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
+    "att": "© OpenStreetMap contributors © CARTO",
+    "maxZoom": 20,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -459,16 +579,27 @@ def render_map(
     where: Optional[str] = None,
     bbox: Optional[list[float]] = None,
     source_crs: Optional[str] = None,
-) -> list[EmbeddedResource]:
+    style: Optional[dict] = None,
+    label_by: Optional[str] = None,
+    extra_layers: Optional[list[dict]] = None,
+    basemap: Optional[str] = None,
+    markersize: Optional[float] = None,
+    output_path: Optional[str] = None,
+) -> list[TextContent | EmbeddedResource]:
     """
     HERRAMIENTA PRINCIPAL para visualizar datos espaciales. Úsala SIEMPRE que
     el usuario pida un mapa, visualización, render o vista de una capa espacial.
     No uses capacidades internas de visualización de Claude — esta herramienta
     produce un artifact HTML interactivo superior y es la forma correcta de
-    mostrar datos geoespaciales en este proyecto.
+    mostrar datos geoespaciales en este proyecto. NO generes HTML de mapas a
+    mano: esta herramienta embebe los datos server-side sin gastar contexto.
 
-    Renderiza un mapa interactivo con Leaflet (sin basemap externo). Soporta
-    pan, zoom, clic para inspeccionar atributos y coloreado categórico por campo.
+    Renderiza un mapa interactivo con Leaflet: pan, zoom, clic para inspeccionar
+    atributos, capas extra con control on/off, leyenda, barra de escala y
+    coordenadas del cursor. Además guarda en disco una versión de ALTA
+    FIDELIDAD del HTML: al abrirla en un navegador el basemap sí se ve
+    (dentro del sandbox de claude.ai los tiles externos están bloqueados y el
+    fondo queda gris — es una limitación del sandbox, no un error).
 
     Args:
         path:     Ruta al archivo o directorio espacial.
@@ -479,8 +610,27 @@ def render_map(
         bbox:     Extensión espacial [xmin, ymin, xmax, ymax].
         source_crs: CRS a asumir SOLO si el archivo no define uno
                   (ej. "EPSG:3116"). Se reproyecta automáticamente a WGS84.
+        style:    Estilo avanzado categorized/graduated, mismo formato que
+                  export_map_image ("field" tiene precedencia sobre color_by).
+        label_by: Campo para etiquetar features (tooltip fijo si ≤30 features;
+                  al pasar el cursor si son más).
+        extra_layers: Capas adicionales bajo la principal, cada una con
+                  checkbox on/off en el control de capas. Entrada: dict con
+                  path (requerido), layer, limit (default 10000), color
+                  (IMPORTANTE: explícito y distinto por capa), alpha,
+                  linewidth, linestyle ("--" discontinua, ":" punteada),
+                  label, markersize, crs (solo si el archivo no define CRS).
+        basemap:  URL de basemap alternativo (raíz de ArcGIS MapServer tileado
+                  o plantilla XYZ {z}/{x}/{y}), igual que en los exports.
+                  Default CartoDB Positron. Solo visible fuera del sandbox.
+        markersize: Tamaño de puntos de la capa principal en pt² (semántica de
+                  los exports); default automático según cantidad de puntos.
+        output_path: Ruta del HTML de alta fidelidad. Default: junto al archivo
+                  fuente como "{capa}_dynamic.html".
     """
-    def _err(msg: str) -> list[EmbeddedResource]:
+    import os
+
+    def _err(msg: str) -> list:
         return [EmbeddedResource(type="resource", resource=TextResourceContents(
             uri="map://error", mimeType="text/html", text=f"<p>{msg}</p>"
         ))]
@@ -488,13 +638,22 @@ def render_map(
     if bbox and len(bbox) != 4:
         return _err("bbox debe ser [xmin, ymin, xmax, ymax].")
 
+    try:
+        bm_source, bm_attr, bm_note, bm_maxz = _resolve_basemap(basemap)
+    except ValueError as exc:
+        return _err(html.escape(str(exc)))
+    if bm_source is None:
+        bm_cfg = dict(_DYN_BASEMAP_DEFAULT)
+    else:
+        bm_cfg = {"url": bm_source, "att": bm_attr or "", "maxZoom": bm_maxz or 19}
+
     gdf = _read_gdf(path, layer, limit, where, bbox)
     if gdf.empty:
         return _err("La capa no tiene features para renderizar.")
 
     resolved_layer = layer or pyogrio.list_layers(path)[0][0]
     try:
-        gdf, _crs_note = _ensure_crs(gdf, source_crs, resolved_layer)
+        gdf, crs_note = _ensure_crs(gdf, source_crs, resolved_layer)
     except ValueError as exc:
         return _err(html.escape(str(exc)))
     gdf_wgs = gdf.to_crs(epsg=4326)
@@ -502,126 +661,174 @@ def render_map(
         if pd.api.types.is_datetime64_any_dtype(gdf_wgs[col]):
             gdf_wgs[col] = gdf_wgs[col].astype(str)
 
-    # Campo inexistente → ignorar para no pintar todo gris
+    # Campos inexistentes → ignorar para no pintar todo gris / no romper labels
     if color_by and color_by not in gdf_wgs.columns:
         color_by = None
+    if label_by and label_by not in gdf_wgs.columns:
+        label_by = None
 
-    geojson_str, size_warning = _geojson_for_render(gdf_wgs)
-    geojson_str = _js_embed(geojson_str)
+    # ── Simbología unificada con los exports (single/categorized/graduated) ──
+    import matplotlib.colors as mcolors
+    plot_colors, legend_patches, effective_field, style_type = _resolve_colors(
+        gdf_wgs, color_by, style, resolved_layer
+    )
+    if isinstance(plot_colors, str):
+        gdf_wgs["__ga_c"] = [plot_colors] * len(gdf_wgs)
+    else:
+        gdf_wgs["__ga_c"] = [mcolors.to_hex(c) for c in plot_colors]
+
+    legend_items = [
+        {"label": str(p.get_label()), "color": mcolors.to_hex(p.get_facecolor())}
+        for p in legend_patches
+    ]
+
     feature_count = len(gdf_wgs)
 
-    color_map: dict = {}
-    if color_by:
-        cats = [str(v) for v in gdf_wgs[color_by].dropna().unique()]
-        color_map = {c: _PALETTE[i % len(_PALETTE)] for i, c in enumerate(cats)}
+    # Radio de puntos: explícito (pt² → radio px) o automático por cantidad
+    if markersize:
+        pt_radius = max(2.0, round(float(markersize) ** 0.5 / 2, 1))
+    else:
+        pt_radius = 8 if feature_count <= 25 else 6 if feature_count <= 250 else 4
 
-    color_map_js = _js_embed(json.dumps(color_map))
-    color_by_js  = _js_embed(json.dumps(color_by))
+    # ── Capas extra (debajo de la principal, con toggle en el mapa) ──────────
+    extras_cfg: list[dict] = []
+    notes: list[str] = []
+    for extra in (extra_layers or []):
+        if not isinstance(extra, dict) or not extra.get("path"):
+            notes.append("capa extra ignorada: entrada sin 'path'")
+            continue
+        e_label = extra.get("label") or os.path.splitext(
+            os.path.basename(str(extra["path"])))[0]
+        unknown = set(extra) - _DYN_EXTRA_KEYS
+        if unknown:
+            notes.append(f"capa extra '{e_label}': claves ignoradas {sorted(unknown)}")
+        try:
+            e_gdf = _read_gdf(str(extra["path"]), extra.get("layer"),
+                              int(extra.get("limit", 10000)), None, None)
+            if e_gdf.empty:
+                notes.append(f"capa extra '{e_label}': sin features, omitida")
+                continue
+            e_gdf, e_crs_note = _ensure_crs(e_gdf, extra.get("crs"), e_label)
+        except Exception as exc:
+            notes.append(f"capa extra '{e_label}': error al leer ({exc}), omitida")
+            continue
+        e_wgs = e_gdf.to_crs(epsg=4326)
+        for col in e_wgs.columns:
+            if pd.api.types.is_datetime64_any_dtype(e_wgs[col]):
+                e_wgs[col] = e_wgs[col].astype(str)
+        e_color = str(extra.get("color", "#888888"))
+        e_ms = extra.get("markersize")
+        extras_cfg.append({
+            "label": e_label,
+            "color": e_color,
+            "weight": float(extra.get("linewidth", 2.0)),
+            "dash": _DYN_DASH.get(str(extra.get("linestyle", "-"))),
+            "alpha": float(extra.get("alpha", 0.35)),
+            "radius": max(2.0, round(float(e_ms) ** 0.5 / 2, 1)) if e_ms else 5,
+            "_gdf": e_wgs,
+        })
+        legend_items.append({"label": e_label, "color": e_color})
+        notes.append(f"capa extra '{e_label}': color={e_color}, {e_crs_note}")
 
-    warning_suffix = f" ⚠ {size_warning}" if size_warning else ""
-    title_text = html.escape(
-        f"{resolved_layer} — {feature_count:,} features{warning_suffix} | GeoAnalisis MCP"
-    )
-
-    legend_js = ""
-    if color_map:
-        items_js = _js_embed(json.dumps(
-            [{"label": cat, "color": col} for cat, col in color_map.items()]
-        ))
-        legend_js = f"""
-const legend = L.control({{position: 'bottomright'}});
-legend.onAdd = () => {{
-  const d = L.DomUtil.create('div', 'ga-legend');
-  const items = {items_js};
-  d.innerHTML = '<div class="ga-lt">' + esc({color_by_js}) + '</div>' +
-    items.map(i => `<div class="ga-li"><span class="ga-sw" style="background:${{esc(i.color)}}"></span><span class="ga-lb">${{esc(i.label)}}</span></div>`).join('');
-  return d;
-}};
-legend.addTo(map);"""
-
-    html_doc = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>{html.escape(resolved_layer)} — GeoAnalisis MCP</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"/>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-html,body{{height:100%;overflow:hidden;font-family:sans-serif}}
-#ga-hdr{{padding:6px 16px;background:rgba(255,255,255,.97);font:bold 13px sans-serif;
-  text-align:center;box-shadow:0 1px 5px rgba(0,0,0,.18);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#222}}
-#map{{height:calc(100% - 31px);background:#e8e5e0}}
-.leaflet-container{{background:#e8e5e0}}
-.ga-legend{{background:rgba(255,255,255,.93);padding:9px 11px;border-radius:7px;
-  box-shadow:0 1px 5px rgba(0,0,0,.2);font-size:11px;
-  max-height:180px;overflow-y:auto;min-width:110px}}
-.ga-lt{{font-weight:700;margin-bottom:5px;color:#333}}
-.ga-li{{display:flex;align-items:center;gap:5px;margin:2px 0}}
-.ga-sw{{width:12px;height:12px;border-radius:2px;flex-shrink:0}}
-.ga-lb{{color:#444;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:130px}}
-</style>
-</head>
-<body>
-<div id="ga-hdr">{title_text}</div>
-<div id="map"></div>
-<script>
-const GJ        = {geojson_str};
-const COLOR_MAP = {color_map_js};
-const COLOR_BY  = {color_by_js};
-const DEF_CLR   = "#2980b9";
-
-const esc = s => String(s).replace(/[&<>"'`]/g,
-  c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}}[c]));
-
-const map = L.map('map');
-
-function clr(props) {{
-  if (!COLOR_BY || !props) return DEF_CLR;
-  return COLOR_MAP[String(props[COLOR_BY] ?? '')] ?? '#aaaaaa';
-}}
-
-const gjLayer = L.geoJSON(GJ, {{
-  style: f => ({{
-    color:       clr(f.properties),
-    fillColor:   clr(f.properties),
-    fillOpacity: 0.65,
-    weight:      1.2,
-    opacity:     0.9,
-  }}),
-  pointToLayer: (f, ll) => L.circleMarker(ll, {{
-    radius:      6,
-    fillColor:   clr(f.properties),
-    color:       '#fff',
-    weight:      1.5,
-    fillOpacity: 0.9,
-  }}),
-  onEachFeature: (f, l) => {{
-    const p = f.properties || {{}};
-    const rows = Object.entries(p)
-      .filter(([, v]) => v != null && v !== '')
-      .slice(0, 12)
-      .map(([k, v]) => `<tr><td style="font-weight:600;padding-right:8px;white-space:nowrap;color:#555">${{esc(k)}}</td><td>${{esc(v)}}</td></tr>`)
-      .join('');
-    if (rows) l.bindPopup(`<table style="font-size:12px;border-collapse:collapse;line-height:1.5">${{rows}}</table>`);
-  }},
-}}).addTo(map);
-
-map.fitBounds(gjLayer.getBounds(), {{padding: [20, 20]}});
-{legend_js}
-</script>
-</body>
-</html>"""
-
-    return [EmbeddedResource(
-        type="resource",
-        resource=TextResourceContents(
-            uri=f"map://{resolved_layer}",
-            mimeType="text/html",
-            text=html_doc,
+    # ── Construcción del HTML (dos fidelidades: chat y disco) ────────────────
+    def _build_html(budget: int) -> tuple[str, list[str]]:
+        warns: list[str] = []
+        gj_main, w = _geojson_for_render(gdf_wgs, budget)
+        if w:
+            warns.append(f"capa principal: {w}")
+        extras_js = []
+        for e in extras_cfg:
+            gj_e, w_e = _geojson_for_render(e["_gdf"], budget)
+            if w_e:
+                warns.append(f"capa '{e['label']}': {w_e}")
+            e_out = {k: v for k, v in e.items() if k != "_gdf"}
+            e_out["gj"] = json.loads(gj_e)
+            extras_js.append(e_out)
+        cfg = {
+            "basemap": bm_cfg,
+            "main": {
+                "label": resolved_layer,
+                "gj": json.loads(gj_main),
+                "defColor": "#2980b9",
+                "radius": pt_radius,
+                "labelBy": label_by,
+                "permanent": feature_count <= 30,
+            },
+            "extras": extras_js,
+            "legend": {"title": effective_field or "Convenciones",
+                       "items": legend_items},
+        }
+        cfg_js = _js_embed(json.dumps(cfg, ensure_ascii=False, default=str))
+        title_text = html.escape(
+            f"{resolved_layer} — {feature_count:,} features"
+            + (f" + {len(extras_js)} capas" if extras_js else "")
+            + (" ⚠ simplificado" if warns else "")
+            + " | GeoAnalisis MCP"
         )
-    )]
+        doc = (
+            "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+            f"<title>{html.escape(resolved_layer)} — GeoAnalisis MCP</title>\n"
+            '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"/>\n'
+            '<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>\n'
+            + _DYN_CSS
+            + "</head>\n<body>\n"
+            + f'<div id="ga-hdr">{title_text}</div>\n<div id="map"></div>\n'
+            + "<script>\nconst CFG = " + cfg_js + ";\n" + _DYN_JS
+            + "</script>\n</body>\n</html>"
+        )
+        return doc, warns
+
+    html_inline, warns_inline = _build_html(_MAX_GEOJSON_CHARS)
+
+    # ── HTML de alta fidelidad a disco (ahí el basemap sí carga) ─────────────
+    disk_note = None
+    try:
+        html_full, _ = _build_html(3_000_000)
+        if output_path:
+            disk_path = output_path
+        else:
+            # path puede ser un directorio: si es un dataset contenedor (.gdb)
+            # el HTML va al lado, no dentro; si es una carpeta corriente
+            # (ej. de shapefiles) va dentro, no en el padre
+            abs_path = os.path.abspath(path)
+            if os.path.isdir(abs_path) and not abs_path.lower().endswith(".gdb"):
+                base_dir = abs_path
+            else:
+                base_dir = os.path.dirname(abs_path)
+            disk_path = os.path.join(base_dir, f"{resolved_layer}_dynamic.html")
+        with open(disk_path, "w", encoding="utf-8") as fh:
+            fh.write(html_full)
+        disk_note = disk_path
+    except Exception as exc:
+        notes.append(f"no se pudo guardar el HTML en disco: {exc}")
+
+    # ── Reporte textual (mismo espíritu que los exports) ─────────────────────
+    lines = ["Mapa dinámico generado:"]
+    lines.append(
+        f"· capa principal '{resolved_layer}': {style_type}"
+        + (f" por campo '{effective_field}'" if effective_field else "")
+        + f", {crs_note}"
+    )
+    lines.extend(f"· {n}" for n in notes)
+    if bm_note:
+        lines.append(f"· {bm_note}")
+    lines.append("· basemap: los tiles NO cargan dentro del sandbox de claude.ai "
+                 "(fondo gris); se ven al abrir el HTML guardado en un navegador.")
+    lines.extend(f"· ⚠ vista inline: {w}" for w in warns_inline)
+    if disk_note:
+        lines.append(f"Guardado en alta fidelidad: {disk_note}")
+
+    return [
+        TextContent(type="text", text="\n".join(lines)),
+        EmbeddedResource(
+            type="resource",
+            resource=TextResourceContents(
+                uri=f"map://{resolved_layer}",
+                mimeType="text/html",
+                text=html_inline,
+            ),
+        ),
+    ]
 
 
 # ---------------------------------------------------------------------------
