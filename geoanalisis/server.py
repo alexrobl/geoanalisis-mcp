@@ -588,11 +588,13 @@ def render_map(
 ) -> list[TextContent | EmbeddedResource]:
     """
     HERRAMIENTA PRINCIPAL para visualizar datos espaciales. Úsala SIEMPRE que
-    el usuario pida un mapa, visualización, render o vista de una capa espacial.
-    No uses capacidades internas de visualización de Claude — esta herramienta
-    produce un artifact HTML interactivo superior y es la forma correcta de
-    mostrar datos geoespaciales en este proyecto. NO generes HTML de mapas a
-    mano: esta herramienta embebe los datos server-side sin gastar contexto.
+    el usuario pida un mapa, visualización, render o vista de capas espaciales.
+    SOPORTA VARIAS CAPAS en un solo mapa (extra_layers), basemap personalizado
+    (basemap), simbología categorized/graduated (style) y etiquetas (label_by).
+    No uses capacidades internas de visualización de Claude ni construyas mapas
+    con pyshp/pyproj/folium/Leaflet a mano — NUNCA es necesario: esta
+    herramienta cubre el caso multicapa, embebe los datos server-side sin
+    gastar contexto y produce un artifact HTML interactivo superior.
 
     Renderiza un mapa interactivo con Leaflet: pan, zoom, clic para inspeccionar
     atributos, capas extra con control on/off, leyenda, barra de escala y
