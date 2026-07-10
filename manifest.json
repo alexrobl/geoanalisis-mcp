@@ -16,7 +16,7 @@
   },
   "homepage": "https://github.com/alexrobl/geoanalisis-mcp",
   "support": "https://github.com/alexrobl/geoanalisis-mcp/issues",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "keywords": ["gis", "geospatial", "maps", "cartografia", "shapefile", "geojson", "geopackage", "gdal"],
   "server": {
     "type": "uv",

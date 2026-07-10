@@ -3,7 +3,7 @@ name = "geoanalisis-mcp"
 version = "0.2.9"
 description = "MCP server para lectura, análisis y cartografía de datos espaciales vectoriales"
 readme = "README.md"
-license = "Apache-2.0"
+license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Alexander Robles", email = "dalexrobles@gmail.com" }]
 keywords = ["mcp", "gis", "geospatial", "geopandas", "shapefile", "geojson", "cartografia"]
